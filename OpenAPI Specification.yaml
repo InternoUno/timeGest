@@ -1,0 +1,948 @@
+openapi: 3.0.3
+info:
+  title: Project Time Management API
+  description: API for tracking work hours on shared projects.
+  version: 1.0.0
+servers:
+  - url: /api/v1
+    description: Main API Server
+
+components:
+  schemas:
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - email
+
+    Project:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        name:
+          type: string
+        description:
+          type: string
+        creatorId:
+          type: string
+          format: uuid
+          readOnly: true
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/User'
+          readOnly: true # Managed via specific member endpoints
+        goalHours:
+          type: number
+          format: float
+          nullable: true
+        deadline:
+          type: string
+          format: date
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - name
+
+    TimeEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          readOnly: true
+        projectId:
+          type: string
+          format: uuid
+          readOnly: true
+        userId:
+          type: string
+          format: uuid
+          readOnly: true
+        date:
+          type: string
+          format: date
+        duration:
+          type: number
+          format: float # In hours
+          description: Duration of the activity in hours (e.g., 1.5 for 1 hour 30 mins)
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - date
+        - duration
+
+    ProjectStats:
+      type: object
+      properties:
+        totalHours:
+          type: number
+          format: float
+        hoursPerMember:
+          type: object
+          additionalProperties:
+            type: number
+            format: float
+        hoursDistribution: # E.g., { "2024-10-21": 4.5, "2024-10-22": 8.0 }
+          type: object
+          additionalProperties:
+            type: number
+            format: float
+        goalProgress:
+          type: object
+          properties:
+            goalHours:
+              type: number
+              format: float
+            currentHours:
+              type: number
+              format: float
+            percentage:
+              type: number
+              format: float
+            deadline:
+              type: string
+              format: date
+            suggestedDailyHours: # RF5.4
+              type: number
+              format: float
+              nullable: true
+          nullable: true
+
+    ClientLink:
+      type: object
+      properties:
+        linkId:
+          type: string
+          readOnly: true
+          description: Unique link ID to be used in the public URL
+        projectId:
+          type: string
+          format: uuid
+          readOnly: true
+        url:
+          type: string
+          format: url
+          readOnly: true
+        createdAt:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - linkId
+        - url
+
+    ClientDashboardData: # Data shown to the client
+      type: object
+      properties:
+        projectName:
+          type: string
+        totalHours:
+          type: number
+          format: float
+        goalStatus:
+          # Similar to ProjectStats.goalProgress but potentially simplified
+          type: object
+          nullable: true
+        lastActivityDate:
+          type: string
+          format: date
+          nullable: true
+        summaryChartData: # Data for simple charts (e.g., hours/week)
+          type: object # Structure TBD based on chosen charts
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+      required:
+        - code
+        - message
+
+  securitySchemes:
+    bearerAuth: # Security scheme name
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+security: # Apply JWT to all endpoints unless explicitly excluded
+  - bearerAuth: []
+
+paths:
+  # --- Authentication ---
+  /auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user (RF1.1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  format: password
+              required: ["email", "password"]
+      responses:
+        '201':
+          description: User registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid data or email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security: [] # No auth required
+
+  /auth/login:
+    post:
+      tags: [Authentication]
+      summary: Log in a user (RF1.2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+              required: ["email", "password"]
+      responses:
+        '200':
+          description: Login successful, returns JWT token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      security: [] # No auth required
+
+  /auth/forgot-password:
+    post:
+      tags: [Authentication]
+      summary: Request password reset (RF1.3)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+              required: ["email"]
+      responses:
+        '200':
+          description: If the email exists, reset instructions will be sent
+        '404':
+          description: Email not found (optional, returning 200 for security is also common)
+      security: [] # No auth required
+
+  /auth/reset-password:
+     post:
+       tags: [Authentication]
+       summary: Set new password using reset token (RF1.3)
+       requestBody:
+         required: true
+         content:
+           application/json:
+             schema:
+               type: object
+               properties:
+                 token:
+                   type: string
+                 newPassword:
+                   type: string
+               required: ["token", "newPassword"]
+       responses:
+         '200':
+           description: Password updated successfully
+         '400':
+           description: Invalid or expired token
+       security: [] # No auth required
+
+  # --- Current User ---
+  /users/me:
+    get:
+      tags: [User]
+      summary: Get current authenticated user profile
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          description: Unauthorized
+    put:
+      tags: [User]
+      summary: Update current user profile (e.g., name, notification preferences RF8.2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              # Define updatable fields here, e.g., name, notification prefs
+              type: object
+              properties:
+                name:
+                  type: string
+                notificationPreferences: # Example RF8.2
+                  type: object
+                  properties:
+                    projectInvites:
+                      type: boolean
+                    deadlineWarnings:
+                      type: boolean
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid data
+        '401':
+          description: Unauthorized
+
+  # --- Projects ---
+  /projects:
+    get:
+      tags: [Projects]
+      summary: List projects the user is a member of
+      responses:
+        '200':
+          description: List of projects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+    post:
+      tags: [Projects]
+      summary: Create a new project (RF2.1)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                goalHours:
+                  type: number
+                  format: float
+                  nullable: true
+                deadline:
+                  type: string
+                  format: date
+                  nullable: true
+              required: ["name"]
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          description: Invalid data
+        '401':
+          description: Unauthorized
+
+  /projects/{projectId}:
+    get:
+      tags: [Projects]
+      summary: Get details of a specific project
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Project details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member of the project)
+        '404':
+          description: Project not found
+    put:
+      tags: [Projects]
+      summary: Update an existing project (RF2.3 - name, desc, goal, deadline)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                goalHours: # RF5.1
+                  type: number
+                  format: float
+                  nullable: true
+                deadline: # RF5.2
+                  type: string
+                  format: date
+                  nullable: true
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          description: Invalid data
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+    delete:
+      tags: [Projects]
+      summary: Delete a project (RF2.5 - creator only)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Project deleted successfully
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not the project creator)
+        '404':
+          description: Project not found
+
+  # --- Project Members ---
+  /projects/{projectId}/members:
+    get:
+      tags: [Projects]
+      summary: List project members
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of members
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User' # Could include additional info like role in project if evolved
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+    post: # Invite
+      tags: [Projects]
+      summary: Invite a user to join the project (RF2.3)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: # Invite via email
+                  type: string
+                  format: email
+              required: ["email"]
+      responses:
+        '200': # Or 201 if an "invitation" resource is created
+          description: Invitation sent (or user added directly if already registered)
+        '400':
+          description: Invalid email or user already a member
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found / User to invite not found (if required)
+
+  /projects/{projectId}/members/me: # Leave project
+    delete:
+      tags: [Projects]
+      summary: Authenticated user leaves the project (RF2.4)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: User removed from project
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user not a member / creator cannot leave?) - Creator policy TBD
+        '404':
+          description: Project not found
+
+  /projects/{projectId}/members/{userId}: # Removal by creator
+    delete:
+      tags: [Projects]
+      summary: Remove a member from the project (RF2.6 - creator only)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Member removed
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not creator or trying to remove self here)
+        '404':
+          description: Project or User not found in project
+
+  # --- Time Entries ---
+  /projects/{projectId}/time-entries:
+    get:
+      tags: [Time Entries]
+      summary: List time entries for a project (RF3.3)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId # Optional filter (RF4.2)
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: startDate # Optional filter (RF4.2)
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: endDate # Optional filter (RF4.2)
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: List of time entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TimeEntry'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+    post:
+      tags: [Time Entries]
+      summary: Log new time entry for a project (RF3.1)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              # Similar to TimeEntry but without id, projectId, userId (derived from context)
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                duration:
+                  type: number
+                  format: float
+                description:
+                  type: string
+              required: ["date", "duration"]
+      responses:
+        '201':
+          description: Time entry logged successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+        '400':
+          description: Invalid data
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+
+  /time-entries/{entryId}: # Single entry management
+    get:
+      tags: [Time Entries]
+      summary: Get details of a specific time entry
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Time entry details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user not member of associated project)
+        '404':
+          description: Time entry not found
+    put:
+      tags: [Time Entries]
+      summary: Update a time entry (RF3.2 - entry creator only)
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                date:
+                  type: string
+                  format: date
+                duration:
+                  type: number
+                  format: float
+                description:
+                  type: string
+              required: ["date", "duration"]
+      responses:
+        '200':
+          description: Time entry updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TimeEntry'
+        '400':
+          description: Invalid data
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (not the owner of the time entry)
+        '404':
+          description: Time entry not found
+    delete:
+      tags: [Time Entries]
+      summary: Delete a time entry (RF3.2 - entry creator only)
+      parameters:
+        - name: entryId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Time entry deleted
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (not the owner of the time entry)
+        '404':
+          description: Time entry not found
+
+  # --- Statistics ---
+  /projects/{projectId}/stats:
+    get:
+      tags: [Statistics]
+      summary: Get aggregated statistics and chart data (RF4.1, RF4.2, RF4.3, RF5.3, RF5.4)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: userId # Optional filter
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: startDate # Optional filter
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: endDate # Optional filter
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: aggregation # Optional filter (day, week, month) (RF4.3)
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [day, week, month]
+      responses:
+        '200':
+          description: Project statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectStats'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+
+  # --- Client Link ---
+  /projects/{projectId}/client-link:
+    post:
+      tags: [Client Dashboard]
+      summary: Generate or retrieve the client dashboard link (RF6.1)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200': # Or 201 if newly created
+          description: Client link generated/retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientLink'
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
+    delete:
+      tags: [Client Dashboard]
+      summary: Invalidate/Delete the client link (RF6.3)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Client link deleted
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project or Link not found
+
+  /client/{linkId}: # Public access
+    get:
+      tags: [Client Dashboard]
+      summary: Access client dashboard data via link (RF6.2, RF6.3)
+      parameters:
+        - name: linkId
+          in: path
+          required: true
+          schema:
+            type: string # Not necessarily UUID, could be a hash
+      responses:
+        '200':
+          description: Client dashboard data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientDashboardData'
+        '404':
+          description: Invalid or expired link
+      security: [] # Public endpoint
+
+  # --- Export ---
+  /projects/{projectId}/export:
+    get:
+      tags: [Export]
+      summary: Export project data (RF7.1, RF7.2, RF7.3)
+      parameters:
+        - name: projectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: format # Requested format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [csv]
+            default: csv
+        - name: dataType # Type of data to export
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [all_entries, summary_user, summary_period]
+            default: all_entries
+        - name: startDate # Optional filter
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+        - name: endDate # Optional filter
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: CSV file with exported data
+          content:
+            text/csv: # Or application/octet-stream
+              schema:
+                type: string
+                format: binary # Indicates the response is a file
+        '400':
+          description: Invalid parameters (e.g., unsupported format)
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (user is not a member)
+        '404':
+          description: Project not found
